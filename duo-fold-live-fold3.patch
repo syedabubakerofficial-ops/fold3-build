@@ -1,0 +1,249 @@
+diff --git a/app/src/main/java/org/duofold/live/DeviceCompatibility.java b/app/src/main/java/org/duofold/live/DeviceCompatibility.java
+index 1c20c68..492d2f8 100644
+--- a/app/src/main/java/org/duofold/live/DeviceCompatibility.java
++++ b/app/src/main/java/org/duofold/live/DeviceCompatibility.java
+@@ -6,8 +6,16 @@ public final class DeviceCompatibility {
+  public static boolean isFold8(String model) {
+   return model != null && model.matches("SM-F971[A-Z0-9]+(?:/DS)?");
+  }
++ /** Galaxy Z Fold3 (SM-F926). Runs in experimental hinge-sensor mode, without the Samsung wallpaper angle source. */
++ public static boolean isFold3(String model) {
++  return model != null && model.matches("SM-F926[A-Z0-9]+(?:/DS)?");
++ }
++ /** True when the angle comes from the public hinge sensor instead of the Samsung wallpaper log via Shizuku. */
++ public static boolean usesHingeSensor(String model) {
++  return isFold3(model);
++ }
+  public static boolean isRecognized(String model) {
+-  return model != null && model.matches("SM-F(?:971|976|966)[A-Z0-9]+(?:/DS)?");
++  return model != null && model.matches("SM-F(?:971|976|966|926)[A-Z0-9]+(?:/DS)?");
+  }
+  public static String modelWarning(String model) {
+   return isRecognized(model) ? "" : "Unrecognized device: " + String.valueOf(model)
+diff --git a/app/src/main/java/org/duofold/live/FirstRun.kt b/app/src/main/java/org/duofold/live/FirstRun.kt
+index 325a4b7..41b740a 100644
+--- a/app/src/main/java/org/duofold/live/FirstRun.kt
++++ b/app/src/main/java/org/duofold/live/FirstRun.kt
+@@ -5,7 +5,8 @@ object FirstRun {
+  fun required(c:Context):Boolean {
+   val p=c.getSharedPreferences("first_run",0)
+   val marker=p.getInt("state",0)
+-  if(OnboardingPolicy.needsRecovery(marker,p.getBoolean("wallpaper_verified",false))){
++  // Hinge-sensor devices (Fold3) have no Samsung fold wallpaper to verify.
++  if(!DeviceCompatibility.usesHingeSensor(android.os.Build.MODEL) && OnboardingPolicy.needsRecovery(marker,p.getBoolean("wallpaper_verified",false))){
+    p.edit().putInt("state",1).putInt("step",2).putBoolean("repair_required",true).commit()
+    return true
+   }
+diff --git a/app/src/main/java/org/duofold/live/FoldBackgroundService.java b/app/src/main/java/org/duofold/live/FoldBackgroundService.java
+index 3be9e43..760765d 100644
+--- a/app/src/main/java/org/duofold/live/FoldBackgroundService.java
++++ b/app/src/main/java/org/duofold/live/FoldBackgroundService.java
+@@ -9,6 +9,8 @@ public class FoldBackgroundService extends Service {
+  private final Handler main=new Handler(Looper.getMainLooper());
+  private boolean wanted(){FoldAwakeDefault.persist(this);return true;}
+  private LiveAngles angles;
++ private SensorAngles sensorAngles;
++ private void stopSensor(){if(sensorAngles!=null){sensorAngles.stop();sensorAngles=null;}}
+  private FoldAwakeGuard awakeGuard;
+  private long asleepSince=-1,nextReaderAttempt;
+  private String lastNotice="";
+@@ -61,6 +63,7 @@ getSystemService(NotificationManager.class).createNotificationChannel(new Notifi
+   // Ignore transient screen-off during a panel handoff; suspend sustained sleep.
+   if(!interactive&&now-asleepSince>=3000){
+    if(angles!=null){angles.stop();angles=null;RecoveryLog.add("Reader suspended for screen-off");}
++   stopSensor();
+    LiveAngles.status="Screen asleep — reader suspended";
+    main.postDelayed(this,30000);return;
+   }
+@@ -75,7 +78,12 @@ getSystemService(NotificationManager.class).createNotificationChannel(new Notifi
+   }
+   boolean foldEnabled=getSharedPreferences("standalone",0).getBoolean("enabled",false);
+   try{
+-   if(!foldEnabled){if(angles!=null){angles.stop();angles=null;}LiveAngles.status="Fold animation disabled";}else{
++   if(!foldEnabled){if(angles!=null){angles.stop();angles=null;}stopSensor();LiveAngles.status="Fold animation disabled";}else if(DeviceCompatibility.usesHingeSensor(Build.MODEL)){
++    // Fold3 experimental mode: public hinge sensor instead of the Samsung wallpaper reader.
++    if(sensorAngles==null)sensorAngles=new SensorAngles(FoldBackgroundService.this);
++    if(!sensorAngles.start())LiveAngles.status="Hinge angle sensor unavailable on this device";
++    else if(!LiveAngles.fresh())LiveAngles.status="Waiting for a hinge sensor reading — move the hinge";
++   }else{
+    boolean reachable=Shizuku.pingBinder();
+    if(reachable!=lastReachable){lastReachable=reachable;RecoveryLog.add("Shizuku reachability="+reachable);}
+    if(!reachable){
+@@ -100,5 +108,5 @@ getSystemService(NotificationManager.class).createNotificationChannel(new Notifi
+   main.postDelayed(this,2000);
+  }};
+  public void onTaskRemoved(Intent intent){RecoveryLog.add("Settings task dismissed; background service remains running");super.onTaskRemoved(intent);}
+- public void onDestroy(){if(awakeGuard!=null)awakeGuard.close();RecoveryLog.add("Background service destroyed");Shizuku.removeBinderReceivedListener(binderReady);Shizuku.removeBinderDeadListener(binderDead);Shizuku.removeRequestPermissionResultListener(permissionResult);getContentResolver().unregisterContentObserver(foldSettingObserver);try{unregisterReceiver(screen);}catch(Exception ignored){}running=false;main.removeCallbacksAndMessages(null);if(angles!=null){angles.stop();angles=null;}stopForeground(STOP_FOREGROUND_REMOVE);super.onDestroy();}
++ public void onDestroy(){stopSensor();if(awakeGuard!=null)awakeGuard.close();RecoveryLog.add("Background service destroyed");Shizuku.removeBinderReceivedListener(binderReady);Shizuku.removeBinderDeadListener(binderDead);Shizuku.removeRequestPermissionResultListener(permissionResult);getContentResolver().unregisterContentObserver(foldSettingObserver);try{unregisterReceiver(screen);}catch(Exception ignored){}running=false;main.removeCallbacksAndMessages(null);if(angles!=null){angles.stop();angles=null;}stopForeground(STOP_FOREGROUND_REMOVE);super.onDestroy();}
+ }
+diff --git a/app/src/main/java/org/duofold/live/LiveAngles.java b/app/src/main/java/org/duofold/live/LiveAngles.java
+index 4f035d2..4022ec8 100644
+--- a/app/src/main/java/org/duofold/live/LiveAngles.java
++++ b/app/src/main/java/org/duofold/live/LiveAngles.java
+@@ -56,6 +56,15 @@ public final class LiveAngles {
+  public static String status="Angle reader off";
+  public static long ageMs(){return last==0?-1:SystemClock.elapsedRealtime()-last;}
+  public static boolean fresh(){return last>0 && SystemClock.elapsedRealtime()-last<750;}
++ /** Hinge-sensor mode (no Shizuku reader): publish one reading to the same listeners the wallpaper reader feeds. Main thread. */
++ public static void publishSensorAngle(float value,String capability){
++  angle=value;last=SystemClock.elapsedRealtime();sensorCapability=capability;
++  for(Listener l:new ArrayList<>(listeners))l.angle(value,last*1000000L);
++ }
++ /** The sensor reports only on change; keep the last reading fresh without notifying listeners. */
++ public static void keepSensorFresh(){if(last>0&&!Float.isNaN(angle))last=SystemClock.elapsedRealtime();}
++ public static void sensorStopped(){last=0;sensorCapability="";}
++ public static String sensorCapability="";
+  public static void add(Listener l){listeners.add(l);if(fresh())l.angle(angle,last*1000000L);}
+  public static void remove(Listener l){listeners.remove(l);}
+  private final Context context; private final Handler main=new Handler(Looper.getMainLooper());
+diff --git a/app/src/main/java/org/duofold/live/SensorAngles.kt b/app/src/main/java/org/duofold/live/SensorAngles.kt
+new file mode 100644
+index 0000000..d8867fa
+--- /dev/null
++++ b/app/src/main/java/org/duofold/live/SensorAngles.kt
+@@ -0,0 +1,68 @@
++package org.duofold.live
++
++import android.content.Context
++import android.hardware.Sensor
++import android.hardware.SensorEvent
++import android.hardware.SensorEventListener
++import android.hardware.SensorManager
++import android.os.Handler
++import android.os.Looper
++
++/**
++ * Experimental angle source for phones that lack Samsung's FoldInteractive wallpaper (Galaxy Z Fold3).
++ * Feeds the public TYPE_HINGE_ANGLE sensor into [LiveAngles], so the renderers see the same angle stream.
++ * No Shizuku is needed for the angle itself.
++ */
++class SensorAngles(context: Context) : SensorEventListener {
++    private val manager: SensorManager? = context.getSystemService(SensorManager::class.java)
++    private val main = Handler(Looper.getMainLooper())
++    private val tracker = HingeTracker(HingeCapability.POSTURE_ONLY)
++    private var registered = false
++
++    // The hinge sensor reports only when the angle changes, but LiveAngles.fresh() expires after 750 ms.
++    // While the sensor is registered and an angle is known, keep the latest reading fresh (no listener callbacks).
++    private val keepAlive = object : Runnable {
++        override fun run() {
++            if (!registered) return
++            LiveAngles.keepSensorFresh()
++            main.postDelayed(this, KEEP_ALIVE_MS)
++        }
++    }
++
++    val running: Boolean get() = registered
++
++    /** True when the sensor is registered. False when the device exposes no hinge-angle sensor. */
++    fun start(): Boolean {
++        if (registered) return true
++        val m = manager ?: return false
++        val sensor = m.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE) ?: return false
++        registered = m.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST, 0, main)
++        if (registered) {
++            RecoveryLog.add("Hinge sensor angle source started: ${sensor.name}")
++            main.post(keepAlive)
++        }
++        return registered
++    }
++
++    fun stop() {
++        if (!registered) return
++        registered = false
++        manager?.unregisterListener(this)
++        main.removeCallbacks(keepAlive)
++        LiveAngles.sensorStopped()
++        RecoveryLog.add("Hinge sensor angle source stopped")
++    }
++
++    override fun onSensorChanged(event: SensorEvent) {
++        if (event.sensor.type != Sensor.TYPE_HINGE_ANGLE || event.values.isEmpty()) return
++        val raw = event.values[0]
++        tracker.feed(raw, event.timestamp)
++        LiveAngles.publishSensorAngle(tracker.visual ?: raw, tracker.capability.name.lowercase())
++    }
++
++    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
++
++    private companion object {
++        const val KEEP_ALIVE_MS = 200L
++    }
++}
+diff --git a/app/src/main/java/org/duofold/live/SetupActivity.kt b/app/src/main/java/org/duofold/live/SetupActivity.kt
+index ff27d16..feea18f 100644
+--- a/app/src/main/java/org/duofold/live/SetupActivity.kt
++++ b/app/src/main/java/org/duofold/live/SetupActivity.kt
+@@ -34,6 +34,8 @@ class SetupActivity : ComponentActivity() {
+  private var message by mutableStateOf("")
+  private var applying by mutableStateOf(false)
+  private var attempted=false
++ /** Fold3 experimental mode: angle comes from the public hinge sensor, so no Samsung wallpaper or Shizuku step is needed. */
++ private val sensorMode=DeviceCompatibility.usesHingeSensor(Build.MODEL)
+  private var bound=false
+  private val args by lazy { Shizuku.UserServiceArgs(ComponentName(this,WallpaperSetupService::class.java)).daemon(false).processNameSuffix("wallpaper_setup").version(BuildConfig.VERSION_CODE) }
+  private val listener=Shizuku.OnRequestPermissionResultListener { _, result ->
+@@ -78,7 +80,7 @@ class SetupActivity : ComponentActivity() {
+  private fun link(url:String)=open(Intent(Intent.ACTION_VIEW,Uri.parse(url)))
+  override fun onCreate(savedInstanceState:Bundle?){
+   super.onCreate(savedInstanceState)
+-  stage=if(intent.getBooleanExtra("repair",false)) 2 else prefs.getInt("step",0)
++  stage=if(sensorMode) 3 else if(intent.getBooleanExtra("repair",false)) 2 else prefs.getInt("step",0)
+   Shizuku.addRequestPermissionResultListener(listener)
+   setContent {
+    MaterialTheme(colorScheme=darkColorScheme(primary=Color(0xffc9bdff),background=Color(0xff10121c),surface=Color(0xff1b1e2b))){
+@@ -180,7 +182,8 @@ class SetupActivity : ComponentActivity() {
+        }
+        3->{
+         Text("Ready for the animation",style=MaterialTheme.typography.headlineSmall)
+-        Text("The required Samsung fold wallpaper is configured on both home screens. Finish these Android permissions so the animation can run over other apps.")
++        Text(if(sensorMode)"Experimental Galaxy Z Fold3 mode: the hinge angle comes from Android's hinge sensor, so no Samsung wallpaper setup is needed. Finish these Android permissions so the animation can run over other apps. Expect a simpler effect than on newer folds."
++         else "The required Samsung fold wallpaper is configured on both home screens. Finish these Android permissions so the animation can run over other apps.")
+         OutlinedButton(onClick={open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")))}){Text(if(overlay)"Overlay access granted" else "Allow display over other apps")}
+         OutlinedButton(onClick={open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))}){Text(if(accessibility)"Accessibility connected" else "Enable Duo accessibility")}
+         Text("1. Settings → Accessibility → Installed apps → Duo Fold Live: try enabling it. 2. If Restricted setting appears: Settings → Apps → Duo Fold Live → ⋮ → Allow restricted settings; confirm. 3. Return to Accessibility and enable Duo. If the ⋮ menu is missing, report the exact warning and your Android/One UI version. Overlay permission is separate. Enable accessibility only if you trust the app.",style=MaterialTheme.typography.bodySmall)
+@@ -188,7 +191,7 @@ class SetupActivity : ComponentActivity() {
+         OutlinedButton(onClick={if(checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),75)}){Text("Allow service notifications")}
+         Text("Default: Windowed Glass, inspired by iPhone Duo with even more windowed glass. Choose styles in Folding animation styles. Keep-awake is always on and checked in the background.")
+         Button(onClick={
+-         if(!authorized){message="Start Shizuku again before finishing.";attempted=false;go(2);return@Button}
++         if(!authorized&&!sensorMode){message="Start Shizuku again before finishing.";attempted=false;go(2);return@Button}
+          prefs.edit().putInt("state",2).commit()
+          getSharedPreferences("standalone",0).edit().putBoolean("enabled",true).putBoolean("auto_keep_cover_awake",true).apply()
+          startForegroundService(Intent(this@SetupActivity,FoldBackgroundService::class.java))
+@@ -196,7 +199,7 @@ class SetupActivity : ComponentActivity() {
+          startActivity(Intent(this@SetupActivity,MainActivity::class.java))
+          if(custom&&hasPhoto)startActivity(Intent(this@SetupActivity,org.duofold.live.wallpaperlayer.WallpaperActivity::class.java).putExtra("auto_enable",true))
+          finish()
+-        },enabled=overlay&&accessibility&&prefs.getBoolean("wallpaper_verified",false)){Text("Finish & enable animation")}
++        },enabled=overlay&&accessibility&&(sensorMode||prefs.getBoolean("wallpaper_verified",false))){Text("Finish & enable animation")}
+        }
+       }
+       if(message.isNotBlank())Text(message,style=MaterialTheme.typography.bodySmall)
+diff --git a/app/src/test/java/org/duofold/live/DeviceCompatibilityTest.java b/app/src/test/java/org/duofold/live/DeviceCompatibilityTest.java
+index 639a8e4..2c6ba95 100644
+--- a/app/src/test/java/org/duofold/live/DeviceCompatibilityTest.java
++++ b/app/src/test/java/org/duofold/live/DeviceCompatibilityTest.java
+@@ -18,6 +18,22 @@ public class DeviceCompatibilityTest {
+    DeviceCompatibility.requireEligible(model,37);
+   }
+  }
++ @Test public void fold3UsesHingeSensorMode() {
++  for(String region:new String[]{"U","U1","W","B","B/DS","N","0"}) {
++   String model="SM-F926"+region;
++   assertTrue(model,DeviceCompatibility.isFold3(model));
++   assertTrue(model,DeviceCompatibility.usesHingeSensor(model));
++   assertTrue(model,DeviceCompatibility.isRecognized(model));
++   assertEquals("",DeviceCompatibility.modelWarning(model));
++   // The Android 17 hidden-API paths (dual-screen handoff, wallpaper setup) stay gated off for this phone.
++   assertFalse(model,DeviceCompatibility.isEligible(model,34));
++  }
++ }
++ @Test public void newerFoldsKeepWallpaperAngleSource() {
++  for(String model:new String[]{"SM-F971U","SM-F966W","SM-F976B","SM-F956U","unknown",""})
++   assertFalse(model,DeviceCompatibility.usesHingeSensor(model));
++  assertFalse(DeviceCompatibility.usesHingeSensor(null));
++ }
+  @Test public void preservesOsGate() {
+   assertFalse(DeviceCompatibility.isEligible("SM-F966W",36));
+   assertFalse(DeviceCompatibility.isEligible("unknown",38));
