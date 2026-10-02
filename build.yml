@@ -1,0 +1,50 @@
+name: Build Fold 3 debug APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      # This repository only holds the patch file and this workflow.
+      - uses: actions/checkout@v7
+
+      - name: Get upstream source and apply the Fold 3 patch
+        run: |
+          git clone https://github.com/joeconsorti/duo-fold-live.git src
+          cd src
+          git checkout 8ca4371
+          git apply ../duo-fold-live-fold3.patch
+          git status --short
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;35.0.0'
+          cd src
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+
+      - name: Build debug APK
+        run: |
+          cd src
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-fold-live-fold3-debug
+          path: src/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
